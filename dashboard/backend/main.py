@@ -9,18 +9,20 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from bleak import BleakClient, BleakScanner
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictInt
-from config import DATABASE_PATH, MQTT_HOST, MQTT_PORT, MQTT_UP, MQTT_DOWN, SERVICE_UUID, DEVICE_UUID, SSID_UUID, PASSWORD_UUID
+from config import DATABASE_PATH, MQTT_HOST, MQTT_PORT, MQTT_UP, MQTT_DOWN
+from ble_provision import scan_project_devices, write_wifi, provision_error
 from database import Database, DEVICE_ID_RE
 from mqtt_bridge import MqttBridge
+from pi_wifi import PiWifi, WifiError, validate_credentials
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 db = Database(DATABASE_PATH)
 bridge = MqttBridge(db)
 ble_lock = asyncio.Lock()
+wifi_lock = asyncio.Lock()
 jobs = {}
 tasks = set()
 
@@ -134,7 +136,7 @@ def export(device_id: str, start: float, end: float):
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         yield "\ufeff"
-        writer.writerow(["timestamp_utc", "device_id", "ph", "voltage_v", "raw_adc", "adc_mv", "sensor_error"])
+        writer.writerow(["timestamp_utc", "device_id", "ph", "voltage_v", "raw_adc", "adc_mv", "sensor_error", "calibrated", "ph_source"])
         yield buffer.getvalue()
         # Descending keyset pagination avoids duplicate/missing rows if new data arrives during export.
         last_time, last_id = end, 2**63-1
@@ -148,16 +150,16 @@ def export(device_id: str, start: float, end: float):
             buffer.seek(0); buffer.truncate(0)
             for row in rows:
                 stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["recorded_at"]))
-                writer.writerow([stamp, device_id, row["ph"], row["voltage"], row["raw_adc"], row["adc_mv"], row["sensor_error"]])
+                writer.writerow([stamp, device_id, row["ph"], row["voltage"], row["raw_adc"], row["adc_mv"], row["sensor_error"], row["calibrated"], row["ph_source"]])
             yield buffer.getvalue()
             last_time, last_id = rows[-1]["recorded_at"], rows[-1]["id"]
     return StreamingResponse(chunks(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="ph-monitor-{device_id}.csv"'})
 
 def new_job(kind):
     if len(tasks) >= 4:
-        raise HTTPException(409, "Pi đang xử lý BLE, thử lại sau")
+        raise HTTPException(409, "Pi đang xử lý tác vụ, thử lại sau")
     job_id = uuid.uuid4().hex
-    job = {"id": job_id, "kind": kind, "status": "running", "step": 0, "devices": [], "error": None, "created_at": time.time()}
+    job = {"id": job_id, "kind": kind, "status": "running", "step": 0, "stage": "queued", "devices": [], "error": None, "created_at": time.time()}
     jobs[job_id] = job
     return job
 
@@ -169,16 +171,13 @@ def start_task(coroutine):
 async def scan(job):
     try:
         async with ble_lock:
-            discovered = await BleakScanner.discover(timeout=6, return_adv=True)
-        devices = []
-        for device, adv in discovered.values():
-            supported = SERVICE_UUID in [s.lower() for s in adv.service_uuids]
-            devices.append({"id": device.address, "mac": device.address, "name": adv.local_name or device.name or "Thiết bị BLE",
-                            "rssi": adv.rssi, "provisionable": supported})
-        job.update(status="done", devices=sorted(devices, key=lambda d: (not d["provisionable"], -d["rssi"])))
+            job["stage"] = "scanning"
+            devices = await scan_project_devices()
+        job.update(status="done", stage="done", devices=devices)
+        logging.getLogger("ph.ble").info("Scan complete job=%s project_devices=%d", job["id"], len(devices))
     except Exception as error:
-        logging.getLogger("ph.ble").warning("BLE scan failed: %s", type(error).__name__)
-        job.update(status="failed", error="Không quét được BLE trên Pi: "+str(error))
+        logging.getLogger("ph.ble").warning("Scan failed job=%s error_type=%s detail=%r", job["id"], type(error).__name__, str(error))
+        job.update(status="failed", error="Không quét được BLE trên Pi: "+provision_error(error, "scanning"))
 
 @app.post("/api/ble/scan", status_code=202)
 async def scan_ble():
@@ -193,32 +192,28 @@ class ProvisionRequest(BaseModel):
     password: str
 
 async def provision(job, values):
+    log = logging.getLogger("ph.ble")
+    def on_stage(stage, step):
+        job.update(stage=stage, step=step)
+        log.info("Provision job=%s mac=%s stage=%s", job["id"], values.mac, stage)
     try:
         async with ble_lock:
-            job["step"] = 0
-            async with BleakClient(values.mac, timeout=15) as client:
-                if not any(str(service.uuid).lower() == SERVICE_UUID for service in client.services):
-                    raise ValueError("Thiết bị không có service provision của dự án")
-                device_id = (await client.read_gatt_char(DEVICE_UUID)).decode().strip("\x00")
-                if not DEVICE_ID_RE.fullmatch(device_id):
-                    raise ValueError("Device ID BLE không hợp lệ")
-                job.update(step=1, device_id=device_id)
-                await client.write_gatt_char(SSID_UUID, values.ssid.encode(), response=True)
-                # The firmware disconnects BLE as soon as both fields are written.
-                started = time.time()
-                await client.write_gatt_char(PASSWORD_UUID, values.password.encode(), response=True)
+            device_id, started = await write_wifi(values.mac, values.ssid, values.password, on_stage)
+            job["device_id"] = device_id
             db.register(device_id, values.name.strip(), values.mac)
-        job["step"] = 2
+        on_stage("waiting_mqtt", 2)
         for _ in range(60):
             device = next((d for d in db.devices() if d["id"] == device_id), None)
             if device and device.get("lastSeenAt") and device["lastSeenAt"] >= started and device["status"] == "online":
-                job.update(status="done", step=3)
+                job.update(status="done", stage="done", step=3)
+                log.info("Provision complete job=%s device=%s MQTT confirmed", job["id"], device_id)
                 return
             await asyncio.sleep(1)
         raise TimeoutError("Đã gửi Wi-Fi qua BLE nhưng chưa nhận MQTT. Kiểm tra Wi-Fi, Internet và broker.")
     except Exception as error:
-        logging.getLogger("ph.ble").warning("Provision failed: %s", type(error).__name__)
-        job.update(status="failed", error=str(error))
+        message = provision_error(error, job["stage"])
+        log.warning("Provision failed job=%s mac=%s stage=%s error_type=%s detail=%r", job["id"], values.mac, job["stage"], type(error).__name__, str(error))
+        job.update(status="failed", error=message)
 
 @app.post("/api/ble/provision", status_code=202)
 async def provision_ble(values: ProvisionRequest):
@@ -232,6 +227,74 @@ async def provision_ble(values: ProvisionRequest):
 
 @app.get("/api/ble/jobs/{job_id}")
 def ble_job(job_id: str):
-    if job_id not in jobs:
+    if job_id not in jobs or jobs[job_id]["kind"] not in ("scan", "provision"):
         raise HTTPException(404, "Không tìm thấy tác vụ BLE")
+    return jobs[job_id]
+
+
+@app.get("/api/wifi/status")
+async def wifi_status():
+    try:
+        async with PiWifi() as wifi:
+            status = await wifi.status()
+        status["job"] = next((job["id"] for job in jobs.values()
+                              if job["kind"] == "wifi_connect" and job["status"] == "running"), None)
+        return status
+    except Exception:
+        raise HTTPException(503, "Không đọc được NetworkManager trên Raspberry Pi.")
+
+
+class WifiRequest(BaseModel):
+    ssid: str
+    password: str
+
+
+async def run_wifi_job(job, values=None):
+    def stage(value):
+        job["stage"] = value
+        logging.getLogger("ph.wifi").info("Wi-Fi job=%s stage=%s", job["id"], value)
+    try:
+        async with wifi_lock, PiWifi() as wifi:
+            if values is None:
+                stage("scanning")
+                job["networks"] = [{key: value for key, value in row.items() if key != "path"}
+                                   for row in await wifi.scan()]
+            else:
+                job["network"] = await wifi.connect(values.ssid, values.password, stage)
+        job.update(status="done", stage="done")
+    except Exception as error:
+        # Exception messages from the D-Bus library can contain method arguments.
+        logging.getLogger("ph.wifi").warning("Wi-Fi job=%s error_type=%s", job["id"], type(error).__name__)
+        job.update(status="failed", error=str(error) if isinstance(error, WifiError)
+                   else "Không cấu hình được Wi-Fi trên Pi. Kiểm tra NetworkManager rồi thử lại.")
+
+
+def new_wifi_job(kind):
+    if any(job["kind"].startswith("wifi_") and job["status"] == "running" for job in jobs.values()):
+        raise HTTPException(409, "Pi đang quét hoặc kết nối Wi-Fi. Đợi tác vụ hiện tại hoàn tất.")
+    return new_job(kind)
+
+
+@app.post("/api/wifi/scan", status_code=202)
+async def scan_wifi():
+    job = new_wifi_job("wifi_scan")
+    start_task(run_wifi_job(job))
+    return job
+
+
+@app.post("/api/wifi/connect", status_code=202)
+async def connect_wifi(values: WifiRequest):
+    try:
+        validate_credentials(values.ssid, values.password)
+    except WifiError as error:
+        raise HTTPException(422, str(error))
+    job = new_wifi_job("wifi_connect")
+    start_task(run_wifi_job(job, values))
+    return job
+
+
+@app.get("/api/wifi/jobs/{job_id}")
+def wifi_job(job_id: str):
+    if job_id not in jobs or not jobs[job_id]["kind"].startswith("wifi_"):
+        raise HTTPException(404, "Không tìm thấy tác vụ Wi-Fi")
     return jobs[job_id]

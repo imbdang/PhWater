@@ -1,0 +1,13 @@
+[Unit]
+Description=Create Pi Wi-Fi client interface beside the dashboard AP
+Requires=sys-subsystem-net-devices-wlan0.device
+After=sys-subsystem-net-devices-wlan0.device
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ph-wifi-interface
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

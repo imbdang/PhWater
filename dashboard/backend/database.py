@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from ph_calibration import estimate_ph
 
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 DEFAULT_SETTINGS = {"stationName": "Trạm giám sát nước", "phMin": "6.5", "phMax": "8.5", "retention": "30"}
@@ -38,6 +39,13 @@ class Database:
                 created_at REAL NOT NULL, finished_at REAL, response TEXT, error TEXT);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
+        # Keep old history intact. Only newly received samples get the temporary conversion.
+        for table in ("devices", "readings"):
+            columns = {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            if "calibrated" not in columns:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN calibrated INTEGER NOT NULL DEFAULT 0")
+            if "ph_source" not in columns:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN ph_source TEXT")
         with self.db:
             for key, value in DEFAULT_SETTINGS.items():
                 self.db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (key, value))
@@ -90,18 +98,24 @@ class Database:
             error = payload.get("sensor_error")
             if error is not None and (not isinstance(error, str) or len(error) > 96):
                 raise ValueError("invalid sensor error")
+            ph = payload.get("ph")
+            calibrated = ph is not None and payload.get("calibrated") is True
+            source = "firmware_calibrated" if calibrated else "firmware_default" if ph is not None else None
+            if ph is None and error is None:
+                ph = estimate_ph(payload.get("voltage"))
+                if ph is not None:
+                    source = "pi_default"
             self.register(device_id)
             with self.lock, self.db:
                 cursor = self.db.execute("""INSERT OR IGNORE INTO readings
-                    (device_id,message_id,recorded_at,received_at,ph,voltage,raw_adc,adc_mv,sensor_error)
-                    VALUES(?,?,?,?,?,?,?,?,?)""", (device_id, message_id, timestamp, now, payload.get("ph"),
-                        payload.get("voltage"), payload.get("raw_adc"), payload.get("adc_mv"), error))
+                    (device_id,message_id,recorded_at,received_at,ph,voltage,raw_adc,adc_mv,sensor_error,calibrated,ph_source)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (device_id, message_id, timestamp, now, ph,
+                        payload.get("voltage"), payload.get("raw_adc"), payload.get("adc_mv"), error, calibrated, source))
                 if cursor.rowcount == 0:
                     return False
                 self.db.execute("""UPDATE devices SET last_seen=?,cycle_seconds=?,ph=?,voltage=?,
-                    sensor_error=?,status='online',calibrated=? WHERE id=?""",
-                    (now, cycle, payload.get("ph"), payload.get("voltage"), error,
-                     payload.get("calibrated") is True, device_id))
+                    sensor_error=?,status='online',calibrated=?,ph_source=? WHERE id=?""",
+                    (now, cycle, ph, payload.get("voltage"), error, calibrated, source, device_id))
             return True
         if kind == "ack":
             command_id = payload.get("command_id")
@@ -129,6 +143,7 @@ class Database:
             result = []
             for row in self.db.execute("SELECT * FROM devices ORDER BY name"):
                 item = dict(row)
+                item["calibrated"] = bool(item["calibrated"])
                 age = now - item["last_seen"] if item["last_seen"] else None
                 if item["status"] == "online" and (age is None or age > max(30, item["cycle_seconds"] * 3)):
                     item["status"] = "offline"
@@ -166,6 +181,7 @@ class Database:
     @staticmethod
     def reading(row):
         item = dict(row)
+        item["calibrated"] = bool(item["calibrated"])
         item.update(timestamp=item["recorded_at"] * 1000, deviceId=item["device_id"])
         return item
 

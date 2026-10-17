@@ -6,6 +6,8 @@ export type Device = {
   mac: string;
   status: "online" | "offline" | "configured";
   ph: number | null;
+  calibrated: boolean;
+  ph_source?: string | null;
   voltage: number | null;
   sensorError: string | null;
   cycleSeconds: number;
@@ -24,6 +26,8 @@ export type Reading = {
   ph: number | null;
   voltage: number | null;
   deviceId: string;
+  calibrated?: boolean;
+  ph_source?: string | null;
   raw_adc?: number | null;
   adc_mv?: number | null;
   sensor_error?: string | null;
@@ -57,6 +61,36 @@ export type BleJob = {
   devices: BleDevice[];
   error: string | null;
   device_id?: string;
+};
+export type PiNetwork = {
+  available: boolean;
+  interface: string;
+  connected: boolean;
+  ssid: string | null;
+  ip: string | null;
+  apActive: boolean;
+  apSsid: string | null;
+  apIp: string | null;
+  uplink: string | null;
+  sharedRadio: boolean;
+  error: string | null;
+  job: string | null;
+};
+export type WifiNetwork = {
+  ssid: string;
+  signal: number;
+  channel: number;
+  security: "open" | "wpa-psk" | "unsupported";
+  supported: boolean;
+};
+export type WifiJob = {
+  id: string;
+  kind: "wifi_scan" | "wifi_connect";
+  status: "running" | "done" | "failed";
+  stage: string;
+  error: string | null;
+  networks?: WifiNetwork[];
+  network?: PiNetwork;
 };
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

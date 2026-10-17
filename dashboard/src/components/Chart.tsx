@@ -28,25 +28,31 @@ export function PhChart({
   metric?: "ph" | "voltage";
 }) {
   const id = useId().replaceAll(":", "");
-  const values = readings
+  // Old voltage-only history has no pH. Start the axis at the first measured
+  // value for the selected metric; retain gaps between valid samples.
+  const firstValid = readings.findIndex((row) => row[metric] != null);
+  let lastValid = readings.length - 1;
+  while (lastValid >= 0 && readings[lastValid][metric] == null) lastValid--;
+  const data = firstValid < 0 ? [] : readings.slice(firstValid, lastValid + 1);
+  const values = data
     .map((r) => r[metric])
     .filter((v): v is number => v !== null);
   const domainMin =
     metric === "voltage"
       ? Math.max(0, Math.min(...values) - 0.05)
-      : Math.max(0, Math.min(6, min - 0.5));
+      : Math.max(0, Math.min(...values, 6, min - 0.5) - 0.2);
   const domainMax =
     metric === "voltage"
       ? Math.max(...values) + 0.05
-      : Math.min(14, Math.max(9, max + 0.5));
+      : Math.min(14, Math.max(...values, 9, max + 0.5) + 0.2);
   if (!values.length)
     return (
       <div className="chart-empty">
         Chưa có số đo trong khoảng thời gian này.
       </div>
     );
-  const first = readings[0].timestamp;
-  const last = readings[readings.length - 1].timestamp;
+  const first = data[0].timestamp;
+  const last = data[data.length - 1].timestamp;
   const ticks: number[] = [];
   if (first === last) {
     ticks.push(first);
@@ -65,7 +71,7 @@ export function PhChart({
     <div className={compact ? "ph-chart compact" : "ph-chart"}>
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <AreaChart
-          data={chartReadings(readings)}
+          data={chartReadings(data)}
           margin={{ top: 14, right: 10, bottom: 0, left: -22 }}
           accessibilityLayer
         >

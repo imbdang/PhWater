@@ -1,0 +1,13 @@
+// NetworkManager performs privileged operations over D-Bus. The API stays
+// unprivileged, including NoNewPrivileges=true; it never shells out with a PSK.
+polkit.addRule(function(action, subject) {
+    if (subject.user === "haianh" && [
+        "org.freedesktop.NetworkManager.wifi.scan",
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.settings.modify.system",
+        "org.freedesktop.NetworkManager.settings.modify.own",
+        "org.freedesktop.NetworkManager.wifi.share.protected"
+    ].indexOf(action.id) !== -1) {
+        return polkit.Result.YES;
+    }
+});

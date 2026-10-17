@@ -3,14 +3,15 @@ import { test, expect, type Page } from "@playwright/test";
 // Controlled fixtures only exist in tests; production always calls the Pi API.
 async function mockApi(
   page: Page,
-  options: { ack?: "applied" | "timeout"; ble?: boolean } = {},
+  options: { ack?: "applied" | "timeout"; ble?: boolean; wifi?: "failed" | "done"; ph?: number; calibrated?: boolean } = {},
 ) {
   const device = {
     id: "sensor001",
     name: "Cảm biến nước",
     mac: "CC:7B:5C:34:B0:C0",
     status: "online",
-    ph: null,
+    ph: options.ph ?? null,
+    calibrated: options.calibrated ?? false,
     voltage: 2.15,
     sensorError: null,
     cycleSeconds: 10,
@@ -26,10 +27,16 @@ async function mockApi(
   const readings = Array.from({ length: 24 }, (_, i) => ({
     timestamp: Date.now() - (24 - i) * 1000,
     deviceId: "sensor001",
-    ph: null,
+    ph: options.ph ?? null,
+    calibrated: options.calibrated ?? false,
     voltage: 2.1 + i / 1000,
     raw_adc: 1000 + i,
   }));
+  const piNetwork = {
+    available: true, interface: "wlan1", connected: false, ssid: null as string | null,
+    ip: null as string | null, apActive: true, apSsid: "raspi-haianh", apIp: "10.42.0.1",
+    uplink: "Ethernet", sharedRadio: true, error: null, job: null,
+  };
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url()),
       path = url.pathname;
@@ -55,6 +62,24 @@ async function mockApi(
         database: "/var/lib/ph-monitor/history.sqlite3",
         serverTime: Date.now() / 1000,
       };
+    else if (path === "/api/wifi/status") json = piNetwork;
+    else if (path === "/api/wifi/scan") json = { id: "wifi-scan001", kind: "wifi_scan", status: "running", stage: "scanning", error: null };
+    else if (path === "/api/wifi/jobs/wifi-scan001") json = {
+      id: "wifi-scan001", kind: "wifi_scan", status: "done", stage: "done", error: null,
+      networks: [
+        { ssid: "ImBdang", signal: 97, channel: 10, security: "wpa-psk", supported: true },
+        { ssid: "Office", signal: 70, channel: 6, security: "unsupported", supported: false },
+      ],
+    };
+    else if (path === "/api/wifi/connect") json = { id: "wifi-connect001", kind: "wifi_connect", status: "running", stage: "connecting", error: null };
+    else if (path === "/api/wifi/jobs/wifi-connect001") {
+      if (options.wifi !== "failed") Object.assign(piNetwork, { connected: true, ssid: "ImBdang", ip: "192.168.1.28" });
+      json = {
+        id: "wifi-connect001", kind: "wifi_connect", status: options.wifi || "done", stage: "done",
+        error: options.wifi === "failed" ? "Kết nối thất bại. Kiểm tra mật khẩu Wi-Fi." : null,
+        network: piNetwork,
+      };
+    }
     else if (path === "/api/chart") json = { readings };
     else if (path === "/api/readings")
       json = {
@@ -141,7 +166,7 @@ test("API values and uncalibrated pH render; commands require device ACK", async
   await page.goto("/");
   await expect(page.locator(".metric-value").first()).toContainText("2.150");
   await expect(
-    page.getByText("Chưa hiệu chuẩn pH", { exact: true }),
+    page.getByText("Chưa có số đo pH", { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("Dữ liệu mẫu")).toHaveCount(0);
   await page
@@ -185,10 +210,8 @@ test("BLE scan provisions compatible ESP32 only and sends Wi-Fi to Pi", async ({
   await page.goto("/#devices");
   await page.getByRole("button", { name: "Quét lại", exact: true }).click();
   const rows = page.locator(".live-ble-row");
-  await expect(rows).toHaveCount(2);
-  await expect(
-    rows.last().getByRole("button", { name: "Cấu hình" }),
-  ).toBeDisabled();
+  await expect(rows).toHaveCount(1);
+  await expect(page.getByText("BLE khác", { exact: true })).toHaveCount(0);
   await rows.first().getByRole("button", { name: "Cấu hình" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Tên Wi-Fi (SSID)").fill("Test-WiFi");
@@ -239,6 +262,58 @@ test("API failure never falls back to sample data", async ({ page }) => {
   await expect(page.locator(".metric-grid")).toHaveCount(0);
 });
 
+test("temporary pH is displayed and charted without claiming calibration", async ({ page }) => {
+  await mockApi(page, { ph: 6.6238 });
+  await page.goto("/");
+  await expect(page.locator(".metric-value").nth(1)).toContainText("6.62");
+  await expect(page.getByText("pH tạm · Chưa hiệu chuẩn", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "pH", exact: true }).click();
+  await expect(page.locator(".ph-chart")).toBeVisible();
+  await expect(page.getByText("pH tính từ điện áp với hệ số tạm.", { exact: true })).toBeVisible();
+  await page.goto("/#devices");
+  await expect(page.getByText("pH tạm · Chưa hiệu chuẩn", { exact: false })).toBeVisible();
+  await expect(page.getByText("Đã hiệu chuẩn", { exact: true })).toHaveCount(0);
+  await page.goto("/#history");
+  await expect(page.locator(".live-ph-estimate")).toHaveCount(20);
+});
+
+test("calibrated firmware measurements keep their calibration label", async ({ page }) => {
+  await mockApi(page, { ph: 7.1, calibrated: true });
+  await page.goto("/");
+  await expect(page.getByText("Đã hiệu chuẩn", { exact: true })).toBeVisible();
+  await expect(page.getByText("pH tạm · Chưa hiệu chuẩn", { exact: true })).toHaveCount(0);
+});
+
+test("Pi Wi-Fi scans and connects using its own API, with AP retained", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#settings");
+  const panel = page.getByRole("region", { name: "Wi-Fi của Raspberry Pi" });
+  await panel.getByRole("button", { name: "Quét Wi-Fi", exact: true }).click();
+  await panel.getByLabel("Mạng Wi-Fi tìm thấy").selectOption("ImBdang");
+  await expect(panel.getByLabel("SSID của Raspberry Pi", { exact: true })).toHaveValue("ImBdang");
+  await expect(panel.locator('option[value="Office"]')).toHaveAttribute("disabled", "");
+  await panel.getByLabel("Mật khẩu Wi-Fi của Pi", { exact: true }).fill("testpassword");
+  const request = page.waitForRequest((r) => r.url().endsWith("/wifi/connect"));
+  await panel.getByRole("button", { name: "Kết nối Wi-Fi cho Pi", exact: true }).click();
+  expect((await request).postDataJSON()).toEqual({ ssid: "ImBdang", password: "testpassword" });
+  await expect(panel.locator(".pi-wifi-success")).toContainText("Pi đã kết nối ImBdang");
+  await expect(panel.getByLabel("Mật khẩu Wi-Fi của Pi", { exact: true })).toHaveValue("");
+  await expect(panel.getByText("raspi-haianh · 10.42.0.1", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => JSON.stringify({ ...sessionStorage, ...localStorage }))).not.toContain("testpassword");
+});
+
+test("failed Pi Wi-Fi connection never reports success", async ({ page }) => {
+  await mockApi(page, { wifi: "failed" });
+  await page.goto("/#settings");
+  const panel = page.getByRole("region", { name: "Wi-Fi của Raspberry Pi" });
+  await panel.getByLabel("SSID của Raspberry Pi", { exact: true }).fill("ImBdang");
+  await panel.getByLabel("Mật khẩu Wi-Fi của Pi", { exact: true }).fill("wrongpassword");
+  await panel.getByRole("button", { name: "Kết nối Wi-Fi cho Pi", exact: true }).click();
+  await expect(panel.getByRole("alert")).toContainText("Kết nối thất bại");
+  await expect(panel.locator(".pi-wifi-success")).toHaveCount(0);
+  await expect(panel.getByText("raspi-haianh · 10.42.0.1", { exact: true })).toBeVisible();
+});
+
 for (const width of [360, 390, 768, 1440]) {
   test(`all views fit ${width}px without browser errors`, async ({ page }) => {
     const errors: string[] = [];
@@ -248,6 +323,25 @@ for (const width of [360, 390, 768, 1440]) {
     for (const view of ["overview", "devices", "history", "settings"]) {
       await page.goto(`/#${view}`);
       await expect(page.locator(".page-content")).toBeVisible();
+      if (view === "devices") {
+        await page
+          .getByRole("button", { name: "Quét lại", exact: true })
+          .click();
+        await expect(page.locator(".live-ble-row")).toHaveCount(1);
+        const mac = page.locator(".live-ble-mac");
+        await expect(mac).toHaveCSS("white-space", "nowrap");
+        expect(
+          await mac.evaluate((element) => {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            return range.getClientRects().length;
+          }),
+        ).toBe(1);
+      }
+      if (view === "settings") {
+        await page.getByRole("button", { name: "Quét Wi-Fi", exact: true }).click();
+        await expect(page.getByLabel("Mạng Wi-Fi tìm thấy")).toBeVisible();
+      }
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth),
       ).toBeLessThanOrEqual(width);

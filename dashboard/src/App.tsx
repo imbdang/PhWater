@@ -26,6 +26,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { PhChart } from "@/components/Chart";
 import { ProvisionDialog } from "@/components/ProvisionDialog";
+import { PiWifiPanel } from "@/components/PiWifiPanel";
 import {
   api,
   command,
@@ -50,7 +51,7 @@ const subtitles: Record<Page, string> = {
   overview: "Theo dõi cảm biến nước, ngay tại trạm của bạn.",
   devices: "Kết nối ESP32 qua BLE và điều khiển chu kỳ gửi MQTT.",
   history: "Số đo thật được lưu trên Raspberry Pi theo thời gian.",
-  settings: "Cấu hình trạm và thời gian lưu lịch sử.",
+  settings: "Kết nối Wi-Fi cho Pi, cấu hình trạm và lịch sử.",
 };
 function initialPage(): Page {
   return (
@@ -434,7 +435,7 @@ function Overview({
   const [range, setRange] = useState<Range>("24h");
   const [readings, setReadings] = useState<Reading[]>([]);
   const [chartError, setChartError] = useState("");
-  const [metric, setMetric] = useState<"voltage" | "ph">("voltage");
+  const [metric, setMetric] = useState<"voltage" | "ph">("ph");
   const refresh = Math.floor(snapshot.serverTime / 5);
   useEffect(() => {
     const controller = new AbortController();
@@ -502,8 +503,8 @@ function Overview({
           <div className="metric-bottom">
             <span className="muted">
               {device?.ph == null
-                ? "Chưa hiệu chuẩn pH"
-                : "Đã nhận từ cảm biến"}
+                ? "Chưa có số đo pH"
+                : device.calibrated ? "Đã hiệu chuẩn" : "pH tạm · Chưa hiệu chuẩn"}
             </span>
           </div>
         </article>
@@ -607,7 +608,9 @@ function Overview({
               {metric === "voltage" ? "Điện áp đầu ra PO" : "pH"}
             </span>
             <span className="chart-legend-note">
-              {liveReadings.length
+              {metric === "ph" && device?.ph != null && !device.calibrated
+                ? "pH tính từ điện áp với hệ số tạm."
+                : liveReadings.length
                 ? "Biểu đồ trung bình theo khoảng; CSV giữ số đo gốc."
                 : "Đang chờ số đo đầu tiên"}
             </span>
@@ -804,7 +807,7 @@ function Devices({
         if (state.status === "failed")
           throw new Error(state.error || "Quét BLE thất bại");
         if (state.status === "done") {
-          setBleDevices(state.devices);
+          setBleDevices(state.devices.filter((device) => device.provisionable));
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 700));
@@ -870,11 +873,10 @@ function Devices({
             <span className="device-symbol">
               <Bluetooth size={21} />
             </span>
-            <div>
+            <div className="live-ble-identity">
               <strong>{d.name}</strong>
-              <small>
-                {d.mac} · {d.rssi} dBm
-              </small>
+              <small className="live-ble-mac">{d.mac}</small>
+              <small className="live-ble-signal">{d.rssi} dBm</small>
             </div>
             <Badge tone={d.provisionable ? "green" : "gray"}>
               {d.provisionable ? "ESP32 tương thích" : "BLE khác"}
@@ -920,7 +922,7 @@ function Devices({
             </div>
             <p className="form-hint">
               {device.lastSeen} ·{" "}
-              {device.ph == null ? "Chưa hiệu chuẩn pH" : "Đã hiệu chuẩn"}
+              {device.ph == null ? "Chưa có số đo pH" : device.calibrated ? "Đã hiệu chuẩn" : "pH tạm · Chưa hiệu chuẩn"}
             </p>
             <DeviceControls
               device={device}
@@ -1073,7 +1075,10 @@ function HistoryPage({
                     <td>
                       <strong>{format(reading.voltage)}</strong>
                     </td>
-                    <td>{format(reading.ph, 2)}</td>
+                    <td>
+                      {format(reading.ph, 2)}
+                      {reading.ph != null && !reading.calibrated && <small className="live-ph-estimate">Tạm</small>}
+                    </td>
                     <td>{reading.raw_adc ?? "—"}</td>
                     <td>
                       {reading.sensor_error ? (
@@ -1230,7 +1235,7 @@ function SettingsPage({
               </small>
             </label>
             <p className="form-hint">
-              pH chưa hiệu chuẩn. Hiện trạm lưu và vẽ điện áp thật từ ADC.
+              pH đang dùng hệ số tạm: 2,50 V → pH 7; −5,70 pH/V. Có thể xem biểu đồ pH và điện áp thật.
             </p>
             {error && (
               <p className="form-error" role="alert">
@@ -1243,6 +1248,7 @@ function SettingsPage({
           </div>
         </form>
         <div className="live-info-stack">
+          <PiWifiPanel mqttConnected={snapshot.mqtt.connected} />
           <section className="panel live-info-panel">
             <SectionHeading
               title="MQTT broker"

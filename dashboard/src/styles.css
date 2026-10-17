@@ -2990,6 +2990,12 @@ th {
 }
 
 /* Live dashboard: same visual system, with real device controls. */
+.live-ph-estimate {
+  display: inline-block;
+  margin-left: 6px;
+  color: #9b784b;
+  font-size: 10px;
+}
 .live-overview-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 310px;
@@ -3145,7 +3151,8 @@ th {
   padding: 0 0 20px;
 }
 .live-ble-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 14px;
   padding: 16px 0;
@@ -3159,6 +3166,19 @@ th {
   font-size: 13px;
   display: block;
   margin-bottom: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-ble-row .live-ble-mac {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+}
+.live-ble-row .live-ble-signal {
+  margin-top: 3px;
+  font-size: 10px;
 }
 .live-device-values {
   display: flex;
@@ -3248,6 +3268,67 @@ th {
   overflow-wrap: anywhere;
   line-height: 1.7;
 }
+.pi-wifi-panel .section-heading {
+  align-items: start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pi-wifi-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 22px;
+}
+.pi-wifi-form > label {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+  font-size: 12px;
+  color: #52685d;
+}
+.pi-wifi-form input,
+.pi-wifi-form select {
+  width: 100%;
+  min-width: 0;
+}
+.pi-wifi-password {
+  position: relative;
+}
+.pi-wifi-password input {
+  padding-right: 42px;
+}
+.pi-wifi-password button {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #6b8176;
+  cursor: pointer;
+}
+.pi-wifi-progress,
+.pi-wifi-success {
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: #16866c;
+}
+.pi-wifi-progress {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+}
+.pi-wifi-progress svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
 @media (max-width: 1200px) {
   .live-overview-grid {
     grid-template-columns: minmax(0, 1fr) 285px;
@@ -3284,14 +3365,20 @@ th {
     grid-column: 1/-1;
   }
   .live-ble-row {
-    flex-wrap: wrap;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
     gap: 10px;
   }
+  .live-ble-row .live-ble-identity {
+    grid-column: 2 / -1;
+  }
   .live-ble-row > .badge {
-    margin-left: 54px;
+    grid-column: 1 / 3;
+    justify-self: start;
+    margin-left: 0;
   }
   .live-ble-row > .button {
-    margin-left: auto;
+    grid-column: 3;
+    margin-left: 0;
   }
   .live-control-panel,
   .live-device-card,

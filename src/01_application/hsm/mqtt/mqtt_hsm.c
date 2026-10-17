@@ -3,6 +3,7 @@
 #include "hsm.h"
 #include "m_mqtt.h"
 #include "m_sensor.h"
+#include "ph_calibration.h"
 #include "cJSON.h"
 #include "nvs.h"
 #include "esp_crt_bundle.h"
@@ -64,22 +65,26 @@ static bool publish_sample(const char *command_id)
     cJSON_AddNumberToObject(message, "uptime_seconds", esp_timer_get_time()/1000000);
     cJSON_AddNumberToObject(message, "cycle_seconds", s_cycle);
     cJSON_AddStringToObject(message, "status", "online");
-    cJSON_AddBoolToObject(message, "calibrated", false);
-    cJSON_AddNullToObject(message, "ph");
+    cJSON_AddBoolToObject(message, "calibrated", APP_PH_CALIBRATED);
+    cJSON_AddStringToObject(message, "ph_source", APP_PH_CALIBRATED ? "calibrated" : "default");
     if (command_id && command_id[0]) cJSON_AddStringToObject(message, "command_id", command_id);
     if (error == ESP_OK) {
+        cJSON_AddNumberToObject(message, "ph", app_ph_from_voltage(sample.po_voltage));
         cJSON_AddNumberToObject(message, "voltage", sample.po_voltage);
         cJSON_AddNumberToObject(message, "raw_adc", sample.raw);
         cJSON_AddNumberToObject(message, "adc_mv", sample.adc_mv);
         cJSON_AddNullToObject(message, "sensor_error");
     } else {
+        cJSON_AddNullToObject(message, "ph");
         cJSON_AddNullToObject(message, "voltage");
         cJSON_AddStringToObject(message, "sensor_error", esp_err_to_name(error));
     }
     char *payload = cJSON_PrintUnformatted(message);
     int result = payload ? m_mqtt_publish(APP_MQTT_UP, payload, 1, false) : -1;
-    ESP_LOGI("app_mqtt", "telemetry seq=%lu cycle=%lu voltage=%.3f sensor=%s enqueue=%d",
-             (unsigned long)s_sequence, (unsigned long)s_cycle, sample.po_voltage, esp_err_to_name(error), result);
+    ESP_LOGI("app_mqtt", "telemetry seq=%lu cycle=%lu voltage=%.3f ph=%.2f calibrated=%d sensor=%s enqueue=%d",
+             (unsigned long)s_sequence, (unsigned long)s_cycle, sample.po_voltage,
+             error == ESP_OK ? app_ph_from_voltage(sample.po_voltage) : NAN,
+             APP_PH_CALIBRATED, esp_err_to_name(error), result);
     cJSON_free(payload); cJSON_Delete(message);
     s_last_publish = esp_timer_get_time();
     return result >= 0;

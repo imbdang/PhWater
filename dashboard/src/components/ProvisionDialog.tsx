@@ -291,7 +291,10 @@ function ProvisionForm({
             <span />
           </div>
           <h3>Đang cấu hình ESP32...</h3>
-          <p>Đang chờ Wi-Fi và MQTT, tối đa khoảng một phút.</p>
+          <p>
+            Đang kết nối BLE và gửi Wi-Fi. Pi chờ MQTT tối đa 60 giây sau khi
+            gửi.
+          </p>
           <ol>
             {[
               "Kết nối với ESP32 qua BLE",

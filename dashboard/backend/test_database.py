@@ -20,7 +20,9 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(self.db.ingest('phwateresp32/sensor001', self.message))
         rows=self.db.history('sensor001',0,time.time()+1)
         self.assertEqual(rows['total'],1)
-        self.assertIsNone(rows['readings'][0]['ph'])
+        self.assertAlmostEqual(rows['readings'][0]['ph'],9.28)
+        self.assertEqual(rows['readings'][0]['ph_source'],'pi_default')
+        self.assertFalse(rows['readings'][0]['calibrated'])
         self.assertEqual(rows['readings'][0]['voltage'],2.1)
 
     def test_topic_identity_and_nonfinite_values_rejected(self):
@@ -69,9 +71,42 @@ class StorageTests(unittest.TestCase):
         with self.db.db:
             self.db.db.execute('UPDATE devices SET last_seen=?',(time.time()-40,))
         self.assertEqual(self.db.devices()[0]['status'],'offline')
+
         self.db.ingest('phwateresp32/sensor001',{**self.message,'message_id':'boot:2'})
         self.db.ingest('phwateresp32/sensor001',{'type':'status','device_id':'sensor001','status':'offline'})
         self.assertEqual(self.db.devices()[0]['status'],'offline')
+
+    def test_firmware_ph_is_preserved_with_its_calibration_flag(self):
+        self.db.ingest('phwateresp32/sensor001',{**self.message,'ph':6.62})
+        self.assertEqual(self.db.devices()[0]['ph'],6.62)
+        self.assertFalse(self.db.devices()[0]['calibrated'])
+        self.assertEqual(self.db.devices()[0]['ph_source'],'firmware_default')
+        self.db.ingest('phwateresp32/sensor001',{**self.message,'message_id':'boot:cal','ph':7.1,'calibrated':True})
+        self.assertEqual(self.db.devices()[0]['ph'],7.1)
+        self.assertTrue(self.db.devices()[0]['calibrated'])
+        self.assertEqual(self.db.devices()[0]['ph_source'],'firmware_calibrated')
+
+    def test_sensor_errors_and_missing_voltage_do_not_create_ph(self):
+        self.db.ingest('phwateresp32/sensor001',{**self.message,'sensor_error':'ESP_ERR_INVALID_STATE'})
+        self.assertIsNone(self.db.devices()[0]['ph'])
+        self.db.ingest('phwateresp32/sensor001',{**self.message,'message_id':'boot:missing','voltage':None})
+        self.assertIsNone(self.db.devices()[0]['ph'])
+
+    def test_migration_preserves_old_null_history_and_accepts_new_estimates(self):
+        self.db.ingest('phwateresp32/sensor001',self.message)
+        with self.db.db:
+            self.db.db.execute('UPDATE readings SET ph=NULL')
+            self.db.db.execute('ALTER TABLE readings DROP COLUMN calibrated')
+            self.db.db.execute('ALTER TABLE readings DROP COLUMN ph_source')
+            self.db.db.execute('ALTER TABLE devices DROP COLUMN ph_source')
+        other=Database(str(Path(self.temp.name)/'test.sqlite3'))
+        try:
+            self.assertIsNone(other.history('sensor001',0,time.time()+1)['readings'][0]['ph'])
+            other.ingest('phwateresp32/sensor001',{**self.message,'message_id':'boot:new','voltage':2.566})
+            self.assertAlmostEqual(other.devices()[0]['ph'],6.6238)
+            self.assertEqual(other.history('sensor001',0,time.time()+1)['total'],2)
+        finally:
+            other.db.close()
 
 if __name__=='__main__':
     unittest.main()
